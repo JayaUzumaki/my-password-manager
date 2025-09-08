@@ -1,9 +1,13 @@
 import React from "react";
+
 // In your local Vite project, `import { createClient } from '@supabase/supabase-js'` is the standard way.
+
 // This CDN import is used to ensure compatibility in different preview environments.
+
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm";
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
@@ -11,6 +15,7 @@ if (!supabaseUrl || !supabaseKey) {
     "Supabase URL or Key is missing. Make sure to set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env.local file."
   );
 }
+
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- Crypto Helper Functions ---
@@ -145,6 +150,15 @@ function Auth() {
     }
   };
 
+  const handleOAuthLogin = async (provider) => {
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithOAuth({ provider });
+    if (error) {
+      setMessage(`Error: ${error.message}`);
+    }
+    setLoading(false);
+  };
+
   return (
     <div className="flex flex-col gap-6 animate-fade-in">
       <div className="text-center">
@@ -170,6 +184,19 @@ function Auth() {
           {loading ? "Sending..." : "Send Magic Link"}
         </button>
       </form>
+      <div className="relative flex py-2 items-center">
+        <div className="flex-grow border-t border-slate-700"></div>
+        <span className="flex-shrink mx-4 text-slate-400 text-xs">OR</span>
+        <div className="flex-grow border-t border-slate-700"></div>
+      </div>
+      <button
+        onClick={() => handleOAuthLogin("google")}
+        className="bg-white/10 hover:bg-white/20 font-bold py-3 px-4 rounded-lg transition-all duration-300 flex items-center justify-center gap-3"
+        disabled={loading}
+      >
+        <i className="fa-brands fa-google"></i>
+        <span>Sign in with Google</span>
+      </button>
       {message && <p className="text-center text-green-400 mt-2">{message}</p>}
     </div>
   );
@@ -192,6 +219,27 @@ function Dashboard({ session }) {
   const [confirmingDeleteId, setConfirmingDeleteId] = React.useState(null);
   const [copiedInfo, setCopiedInfo] = React.useState({ id: null, timer: null });
 
+  // MFA State
+  const [isMfaEnabled, setIsMfaEnabled] = React.useState(false);
+  const [showMfaSetup, setShowMfaSetup] = React.useState(false);
+  const [isMfaModalOpen, setIsMfaModalOpen] = React.useState(false);
+  const [passwordToVerify, setPasswordToVerify] = React.useState(null);
+
+  const getProfile = React.useCallback(async () => {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("mfa_enabled")
+      .single();
+    if (error && error.code !== "PGRST116") {
+      // PGRST116 means no row found
+      console.error("Error fetching profile:", error);
+    } else if (data) {
+      setIsMfaEnabled(data.mfa_enabled);
+    } else {
+      setIsMfaEnabled(false);
+    }
+  }, []);
+
   const getPasswords = React.useCallback(async () => {
     setLoadingPasswords(true);
     const { data, error } = await supabase
@@ -206,6 +254,7 @@ function Dashboard({ session }) {
   }, []);
 
   React.useEffect(() => {
+    getProfile();
     getPasswords();
     const channel = supabase
       .channel("passwords")
@@ -218,7 +267,7 @@ function Dashboard({ session }) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [getPasswords]);
+  }, [getPasswords, getProfile]);
 
   const filteredPasswords = React.useMemo(() => {
     return passwords.filter(
@@ -284,7 +333,6 @@ function Dashboard({ session }) {
 
       if (uploadError) {
         setError("Failed to upload icon.");
-        console.error(uploadError);
         return;
       }
 
@@ -324,11 +372,9 @@ function Dashboard({ session }) {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Step 1: Find the old icon URL before doing anything else
     const passwordEntry = passwords.find((p) => p.id === passwordId);
     const oldIconUrl = passwordEntry?.icon_url;
 
-    // Step 2: Upload the new icon
     const fileExt = file.name.split(".").pop();
     const fileName = `${Math.random()}.${fileExt}`;
     const filePath = `${session.user.id}/${fileName}`;
@@ -338,7 +384,6 @@ function Dashboard({ session }) {
       .upload(filePath, file);
     if (uploadError) {
       setError("Failed to upload new icon.");
-      console.error(uploadError);
       return;
     }
 
@@ -347,7 +392,12 @@ function Dashboard({ session }) {
       .getPublicUrl(filePath);
     const newIconUrl = urlData.publicUrl;
 
-    // Step 3: Update the database with the new URL
+    setPasswords((currentPasswords) =>
+      currentPasswords.map((p) =>
+        p.id === passwordId ? { ...p, icon_url: newIconUrl } : p
+      )
+    );
+
     const { error: updateError } = await supabase
       .from("passwords")
       .update({ icon_url: newIconUrl })
@@ -355,19 +405,17 @@ function Dashboard({ session }) {
 
     if (updateError) {
       setError("Failed to update icon URL.");
-      return; // Stop if the database update fails
+      setPasswords((currentPasswords) =>
+        currentPasswords.map((p) =>
+          p.id === passwordId ? { ...p, icon_url: oldIconUrl } : p
+        )
+      );
+      return;
     }
 
-    // Step 4: After successful DB update, delete the old icon if it exists
     if (oldIconUrl) {
       const oldIconPath = oldIconUrl.split("/entry-icons/")[1];
-      const { error: removeError } = await supabase.storage
-        .from("entry-icons")
-        .remove([oldIconPath]);
-      if (removeError) {
-        // This is not a critical error, so we just log it. The main functionality worked.
-        console.error("Failed to remove old icon:", removeError);
-      }
+      await supabase.storage.from("entry-icons").remove([oldIconPath]);
     }
   };
 
@@ -381,15 +429,9 @@ function Dashboard({ session }) {
       return;
     }
 
-    // If DB deletion is successful, delete the associated icon
     if (iconUrl) {
       const iconPath = iconUrl.split("/entry-icons/")[1];
-      const { error: removeError } = await supabase.storage
-        .from("entry-icons")
-        .remove([iconPath]);
-      if (removeError) {
-        console.error("Failed to remove icon on delete:", removeError);
-      }
+      await supabase.storage.from("entry-icons").remove([iconPath]);
     }
 
     setPasswords((prev) => prev.filter((p) => p.id !== id));
@@ -397,15 +439,49 @@ function Dashboard({ session }) {
   };
 
   const revealPassword = async (id, encryptedPass) => {
-    if (revealedPassword[id]) {
-      setRevealedPassword((prev) => ({ ...prev, [id]: null }));
-      return;
+    if (isMfaEnabled) {
+      if (revealedPassword[id]) {
+        setRevealedPassword((prev) => ({ ...prev, [id]: null }));
+      } else {
+        setPasswordToVerify({ id, encryptedPass });
+        setIsMfaModalOpen(true);
+      }
+    } else {
+      if (revealedPassword[id]) {
+        setRevealedPassword((prev) => ({ ...prev, [id]: null }));
+        return;
+      }
+      const decrypted = await decrypt(encryptedPass, decryptionKey);
+      if (decrypted) {
+        setRevealedPassword((prev) => ({ ...prev, [id]: decrypted }));
+      } else {
+        setError("Decryption failed. Key file may be incorrect.");
+      }
     }
+  };
+
+  const handleMfaVerification = async (totp) => {
+    const { data, error } = await supabase.auth.mfa.challengeAndVerify({
+      factorType: "totp",
+      code: totp,
+    });
+
+    if (error) {
+      setError(error.message);
+      return false;
+    }
+
+    const { id, encryptedPass } = passwordToVerify;
     const decrypted = await decrypt(encryptedPass, decryptionKey);
     if (decrypted) {
       setRevealedPassword((prev) => ({ ...prev, [id]: decrypted }));
+      setIsMfaModalOpen(false);
+      setPasswordToVerify(null);
+      setError(null);
+      return true;
     } else {
-      setError("Decryption failed. Key file may be incorrect.");
+      setError("Decryption failed after MFA verification.");
+      return false;
     }
   };
 
@@ -441,8 +517,8 @@ function Dashboard({ session }) {
             Secure Your New Vault
           </h2>
           <p className="text-slate-400 max-w-md">
-            To begin, you need to generate a unique key file. This is the only
-            way to access your encrypted data.
+            To begin, generate a unique key file. This is your only way to
+            access your encrypted data.
           </p>
           <div className="bg-yellow-900/50 border border-yellow-400/30 text-yellow-200 p-4 my-4 text-left rounded-lg">
             <p className="font-bold">CRITICAL INFORMATION:</p>
@@ -451,7 +527,6 @@ function Dashboard({ session }) {
                 Store this file in a secure, offline location (e.g., a USB
                 drive).
               </li>
-              <li>Do NOT store it on your desktop or in cloud storage.</li>
               <li>If you lose this file, your data is PERMANENTLY lost.</li>
             </ul>
           </div>
@@ -469,7 +544,7 @@ function Dashboard({ session }) {
       <div className="flex flex-col gap-6 text-center animate-fade-in p-4">
         <h2 className="text-2xl sm:text-3xl font-bold">Vault Locked</h2>
         <p className="text-slate-400 mb-4">
-          Please upload your key file to decrypt and access your data.
+          Please upload your key file to decrypt your vault.
         </p>
         <div>
           <label
@@ -494,208 +569,440 @@ function Dashboard({ session }) {
 
   return (
     <div className="flex flex-col gap-8 animate-fade-in">
+      {isMfaModalOpen && (
+        <MfaVerifyModal
+          onVerify={handleMfaVerification}
+          onClose={() => setIsMfaModalOpen(false)}
+        />
+      )}
       <header className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
         <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-violet-400 to-purple-500">
           My Vault
         </h1>
-        <button
-          onClick={() => supabase.auth.signOut()}
-          className="bg-red-600/80 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg transition-all text-sm self-start sm:self-center"
-        >
-          {" "}
-          Sign Out{" "}
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setShowMfaSetup(!showMfaSetup)}
+            className="bg-slate-700/50 hover:bg-slate-700 text-white font-bold py-2 px-4 rounded-lg transition-all text-sm"
+          >
+            {showMfaSetup ? "Close Settings" : "MFA Settings"}
+          </button>
+          <button
+            onClick={() => supabase.auth.signOut()}
+            className="bg-red-600/80 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg transition-all text-sm"
+          >
+            {" "}
+            Sign Out{" "}
+          </button>
+        </div>
       </header>
 
-      <section className="bg-black/20 p-4 sm:p-6 rounded-lg border border-white/10">
-        <h2 className="text-xl font-semibold mb-4">Add New Credential</h2>
-        <form
-          onSubmit={handleAddPassword}
-          className="grid grid-cols-1 md:grid-cols-2 gap-4"
-        >
-          <input
-            value={website}
-            onChange={(e) => setWebsite(e.target.value)}
-            placeholder="Website URL (e.g., google.com)"
-            className="bg-slate-800/60 px-3 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
-          />
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="Username or Email"
-            className="bg-slate-800/60 px-3 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
-          />
-          <div className="relative md:col-span-2">
-            <input
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              type="text"
-              placeholder="Password"
-              className="bg-slate-800/60 w-full pr-10 px-3 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
-            />
-            <button
-              type="button"
-              onClick={handleGeneratePassword}
-              title="Generate Secure Password"
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-violet-400 transition-colors"
+      {showMfaSetup ? (
+        <MfaSetup isEnabled={isMfaEnabled} onStatusChange={getProfile} />
+      ) : (
+        <>
+          <section className="bg-black/20 p-4 sm:p-6 rounded-lg border border-white/10">
+            <h2 className="text-xl font-semibold mb-4">Add New Credential</h2>
+            <form
+              onSubmit={handleAddPassword}
+              className="grid grid-cols-1 md:grid-cols-2 gap-4"
             >
-              <i className="fa-solid fa-wand-magic-sparkles w-5 h-5"></i>
-            </button>
-          </div>
-          <div className="md:col-span-2">
-            <label htmlFor="icon-file-input" className="text-sm text-slate-400">
-              Custom Icon (optional)
-            </label>
-            <input
-              id="icon-file-input"
-              type="file"
-              onChange={(e) => setIconFile(e.target.files[0])}
-              accept="image/png, image/jpeg, image/webp"
-              className="mt-1 block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-violet-500/20 file:text-violet-300 hover:file:bg-violet-500/30"
-            />
-          </div>
-          <button
-            type="submit"
-            className="bg-green-600 hover:bg-green-700 font-bold py-2 px-4 rounded-lg transition-all md:col-span-2 transform hover:scale-[1.02] active:scale-100"
-          >
-            Add Credential
-          </button>
-        </form>
-        {error && <p className="text-red-400 mt-4 text-center">{error}</p>}
-      </section>
-
-      <section className="flex flex-col gap-4">
-        <div className="relative">
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search vault..."
-            className="bg-slate-800/60 w-full pl-10 pr-4 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
-          />
-          <i className="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-        </div>
-
-        {loadingPasswords && (
-          <p className="text-center text-slate-400">Loading credentials...</p>
-        )}
-        {!filteredPasswords.length && !loadingPasswords && (
-          <p className="text-center text-slate-400 p-4">
-            {passwords.length > 0
-              ? "No results found."
-              : "Your vault is empty."}
-          </p>
-        )}
-
-        {filteredPasswords.map((p) => (
-          <div
-            key={p.id}
-            className="bg-black/20 p-4 rounded-lg border border-white/10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
-          >
-            <div className="flex items-center gap-4 flex-grow">
-              <div className="relative group flex-shrink-0">
-                <img
-                  src={
-                    p.icon_url ||
-                    `https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`
-                  }
-                  alt="site icon"
-                  className="w-10 h-10 rounded-full bg-slate-700 object-contain p-1"
-                  onError={(e) => {
-                    e.target.onerror = null;
-                    e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
-                  }}
+              <input
+                value={website}
+                onChange={(e) => setWebsite(e.target.value)}
+                placeholder="Website URL (e.g., google.com)"
+                className="bg-slate-800/60 px-3 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
+              />
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Username or Email"
+                className="bg-slate-800/60 px-3 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
+              />
+              <div className="relative md:col-span-2">
+                <input
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  type="text"
+                  placeholder="Password"
+                  className="bg-slate-800/60 w-full pr-10 px-3 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
                 />
-                <label
-                  htmlFor={`icon-change-${p.id}`}
-                  className="absolute inset-0 bg-black/60 rounded-full flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                <button
+                  type="button"
+                  onClick={handleGeneratePassword}
+                  title="Generate Secure Password"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-violet-400 transition-colors"
                 >
-                  <i className="fa-solid fa-camera text-white text-lg"></i>
-                  <input
-                    type="file"
-                    id={`icon-change-${p.id}`}
-                    className="hidden"
-                    accept="image/png, image/jpeg, image/webp"
-                    onChange={(e) => handleIconChange(e, p.id)}
-                  />
-                </label>
+                  <i className="fa-solid fa-wand-magic-sparkles w-5 h-5"></i>
+                </button>
               </div>
-              <div className="flex-grow">
-                <p className="font-bold text-lg text-violet-300 break-words">
-                  {p.website_url}
-                </p>
-                <div className="flex items-center gap-2">
-                  <p className="text-slate-300 break-words">{p.username}</p>
+              <div className="md:col-span-2">
+                <label
+                  htmlFor="icon-file-input"
+                  className="text-sm text-slate-400"
+                >
+                  Custom Icon (optional)
+                </label>
+                <input
+                  id="icon-file-input"
+                  type="file"
+                  onChange={(e) => setIconFile(e.target.files[0])}
+                  accept="image/png, image/jpeg, image/webp"
+                  className="mt-1 block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-violet-500/20 file:text-violet-300 hover:file:bg-violet-500/30"
+                />
+              </div>
+              <button
+                type="submit"
+                className="bg-green-600 hover:bg-green-700 font-bold py-2 px-4 rounded-lg transition-all md:col-span-2 transform hover:scale-[1.02] active:scale-100"
+              >
+                Add Credential
+              </button>
+            </form>
+            {error && <p className="text-red-400 mt-4 text-center">{error}</p>}
+          </section>
+
+          <section className="flex flex-col gap-4">
+            <div className="relative">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search vault..."
+                className="bg-slate-800/60 w-full pl-10 pr-4 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
+              />
+              <i className="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+            </div>
+
+            {loadingPasswords && (
+              <p className="text-center text-slate-400">
+                Loading credentials...
+              </p>
+            )}
+            {!filteredPasswords.length && !loadingPasswords && (
+              <p className="text-center text-slate-400 p-4">
+                {passwords.length > 0
+                  ? "No results found."
+                  : "Your vault is empty."}
+              </p>
+            )}
+
+            {filteredPasswords.map((p) => (
+              <div
+                key={p.id}
+                className="bg-black/20 p-4 rounded-lg border border-white/10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+              >
+                <div className="flex items-center gap-4 flex-grow">
+                  <div className="relative group flex-shrink-0">
+                    <img
+                      src={
+                        p.icon_url ||
+                        `https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`
+                      }
+                      alt="site icon"
+                      className="w-10 h-10 rounded-full bg-slate-700 object-contain p-1"
+                      onError={(e) => {
+                        e.target.onerror = null;
+                        e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
+                      }}
+                    />
+                    <label
+                      htmlFor={`icon-change-${p.id}`}
+                      className="absolute inset-0 bg-black/60 rounded-full flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <i className="fa-solid fa-camera text-white text-lg"></i>
+                      <input
+                        type="file"
+                        id={`icon-change-${p.id}`}
+                        className="hidden"
+                        accept="image/png, image/jpeg, image/webp"
+                        onChange={(e) => handleIconChange(e, p.id)}
+                      />
+                    </label>
+                  </div>
+                  <div className="flex-grow">
+                    <p className="font-bold text-lg text-violet-300 break-words">
+                      {p.website_url}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-slate-300 break-words">{p.username}</p>
+                      <button
+                        onClick={() =>
+                          handleCopyToClipboard(p.username, `${p.id}-user`)
+                        }
+                        title="Copy Username"
+                        className="text-slate-400 hover:text-white transition-colors"
+                      >
+                        {copiedInfo.id === `${p.id}-user` ? (
+                          <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
+                        ) : (
+                          <i className="fa-solid fa-copy w-4 h-4"></i>
+                        )}
+                      </button>
+                    </div>
+                    {revealedPassword[p.id] && (
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className="font-mono text-sm bg-slate-800 p-1 rounded break-all">
+                          {revealedPassword[p.id]}
+                        </span>
+                        <button
+                          onClick={() =>
+                            handleCopyToClipboard(revealedPassword[p.id], p.id)
+                          }
+                          title="Copy Password"
+                          className="text-slate-400 hover:text-white transition-colors"
+                        >
+                          {copiedInfo.id === p.id ? (
+                            <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
+                          ) : (
+                            <i className="fa-solid fa-copy w-4 h-4"></i>
+                          )}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
                   <button
-                    onClick={() =>
-                      handleCopyToClipboard(p.username, `${p.id}-user`)
+                    onClick={() => revealPassword(p.id, p.encrypted_password)}
+                    title={
+                      revealedPassword[p.id]
+                        ? "Hide Password"
+                        : "Reveal Password"
                     }
-                    title="Copy Username"
-                    className="text-slate-400 hover:text-white transition-colors"
+                    className="p-2 bg-slate-700/50 hover:bg-slate-700 rounded-md transition-colors"
                   >
-                    {copiedInfo.id === `${p.id}-user` ? (
-                      <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
+                    {revealedPassword[p.id] ? (
+                      <i className="fa-solid fa-eye-slash w-5 h-5"></i>
                     ) : (
-                      <i className="fa-solid fa-copy w-4 h-4"></i>
+                      <i className="fa-solid fa-eye w-5 h-5"></i>
                     )}
                   </button>
-                </div>
-                {revealedPassword[p.id] && (
-                  <div className="flex items-center gap-2 mt-2">
-                    <span className="font-mono text-sm bg-slate-800 p-1 rounded break-all">
-                      {revealedPassword[p.id]}
-                    </span>
+                  {confirmingDeleteId === p.id ? (
                     <button
-                      onClick={() =>
-                        handleCopyToClipboard(revealedPassword[p.id], p.id)
-                      }
-                      title="Copy Password"
-                      className="text-slate-400 hover:text-white transition-colors"
+                      onClick={() => handleDeletePassword(p.id)}
+                      className="p-2 bg-yellow-500/80 hover:bg-yellow-500 rounded-md transition-colors text-white font-bold text-xs"
                     >
-                      {copiedInfo.id === p.id ? (
-                        <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
-                      ) : (
-                        <i className="fa-solid fa-copy w-4 h-4"></i>
-                      )}
+                      Confirm?
                     </button>
-                  </div>
-                )}
+                  ) : (
+                    <button
+                      onClick={() => setConfirmingDeleteId(p.id)}
+                      title="Delete Credential"
+                      className="p-2 bg-red-600/80 hover:bg-red-600 rounded-md transition-colors"
+                    >
+                      <i className="fa-solid fa-trash-can w-5 h-5"></i>
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
-              <button
-                onClick={() => revealPassword(p.id, p.encrypted_password)}
-                title={
-                  revealedPassword[p.id] ? "Hide Password" : "Reveal Password"
-                }
-                className="p-2 bg-slate-700/50 hover:bg-slate-700 rounded-md transition-colors"
-              >
-                {revealedPassword[p.id] ? (
-                  <i className="fa-solid fa-eye-slash w-5 h-5"></i>
-                ) : (
-                  <i className="fa-solid fa-eye w-5 h-5"></i>
-                )}
-              </button>
-              {confirmingDeleteId === p.id ? (
-                <button
-                  onClick={() => handleDeletePassword(p.id)}
-                  className="p-2 bg-yellow-500/80 hover:bg-yellow-500 rounded-md transition-colors text-white font-bold text-xs"
-                >
-                  Confirm?
-                </button>
-              ) : (
-                <button
-                  onClick={() => setConfirmingDeleteId(p.id)}
-                  title="Delete Credential"
-                  className="p-2 bg-red-600/80 hover:bg-red-600 rounded-md transition-colors"
-                >
-                  <i className="fa-solid fa-trash-can w-5 h-5"></i>
-                </button>
-              )}
-            </div>
+            ))}
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+// --- MFA Setup Component ---
+function MfaSetup({ isEnabled, onStatusChange }) {
+  const [qrCode, setQrCode] = React.useState(null);
+  const [secret, setSecret] = React.useState("");
+  const [verifyCode, setVerifyCode] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [successMessage, setSuccessMessage] = React.useState("");
+  const [enrolledFactor, setEnrolledFactor] = React.useState(null);
+
+  const handleEnroll = async () => {
+    setError("");
+
+    const { data: factorsData, error: factorsError } =
+      await supabase.auth.mfa.listFactors();
+    if (factorsError) {
+      setError(factorsError.message);
+      return;
+    }
+
+    const unverifiedTotpFactor = factorsData?.all?.find(
+      (f) => f.factor_type === "totp" && f.status === "unverified"
+    );
+
+    if (unverifiedTotpFactor) {
+      const { error: unenrollError } = await supabase.auth.mfa.unenroll({
+        factorId: unverifiedTotpFactor.id,
+      });
+      if (unenrollError) {
+        setError(
+          `Could not remove previous MFA attempt: ${unenrollError.message}`
+        );
+        return;
+      }
+    }
+
+    const { data, error } = await supabase.auth.mfa.enroll({
+      factorType: "totp",
+    });
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    setEnrolledFactor(data);
+    setQrCode(data.totp.qr_code);
+    setSecret(data.totp.secret);
+  };
+
+  const handleVerify = async (e) => {
+    e.preventDefault();
+
+    const { data: challengeData, error: challengeError } =
+      await supabase.auth.mfa.challenge({ factorId: enrolledFactor.id });
+    if (challengeError) {
+      setError(challengeError.message);
+      return;
+    }
+
+    const { error: verifyError } = await supabase.auth.mfa.verify({
+      factorId: enrolledFactor.id,
+      challengeId: challengeData.id,
+      code: verifyCode,
+    });
+
+    if (verifyError) {
+      setError(verifyError.message);
+    } else {
+      const { error: profileError } = await supabase
+        .from("profiles")
+        .update({ mfa_enabled: true })
+        .eq("id", (await supabase.auth.getUser()).data.user.id);
+      if (profileError) {
+        setError(profileError.message);
+      } else {
+        setSuccessMessage("MFA has been enabled successfully!");
+        setError("");
+        setQrCode(null);
+        onStatusChange();
+      }
+    }
+  };
+
+  if (isEnabled) {
+    return (
+      <div className="text-center p-8 bg-black/20 rounded-lg">
+        <p className="text-green-400">
+          Multi-Factor Authentication is already enabled.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <section className="bg-black/20 p-4 sm:p-6 rounded-lg border border-white/10 flex flex-col items-center gap-4">
+      <h2 className="text-xl font-semibold">
+        Enable Multi-Factor Authentication
+      </h2>
+      {!qrCode ? (
+        <button
+          onClick={handleEnroll}
+          className="bg-blue-600 hover:bg-blue-700 font-bold py-2 px-4 rounded-lg transition-all"
+        >
+          Start MFA Setup
+        </button>
+      ) : (
+        <div className="flex flex-col items-center gap-4 text-center">
+          <p>
+            1. Scan this QR code with your authenticator app (e.g., Google
+            Authenticator, Authy).
+          </p>
+          <div
+            className="bg-white p-4 rounded-lg"
+            dangerouslySetInnerHTML={{ __html: qrCode }}
+          />
+          <p className="text-sm">
+            Or manually enter this secret: <br />
+            <code className="font-mono bg-slate-700 p-1 rounded">{secret}</code>
+          </p>
+          <p>
+            2. Enter the 6-digit code from your app to verify and complete the
+            setup.
+          </p>
+          <form
+            onSubmit={handleVerify}
+            className="flex flex-col sm:flex-row items-center gap-2"
+          >
+            <input
+              value={verifyCode}
+              onChange={(e) => setVerifyCode(e.target.value)}
+              type="text"
+              placeholder="6-digit code"
+              maxLength="6"
+              className="bg-slate-800/60 px-3 py-2 rounded-lg border border-white/10 text-center"
+            />
+            <button
+              type="submit"
+              className="bg-green-600 hover:bg-green-700 font-bold py-2 px-4 rounded-lg"
+            >
+              Verify & Enable
+            </button>
+          </form>
+        </div>
+      )}
+      {error && <p className="text-red-400">{error}</p>}
+      {successMessage && <p className="text-green-400">{successMessage}</p>}
+    </section>
+  );
+}
+
+// --- MFA Verification Modal ---
+function MfaVerifyModal({ onVerify, onClose }) {
+  const [code, setCode] = React.useState("");
+  const [isLoading, setIsLoading] = React.useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setIsLoading(true);
+    const success = await onVerify(code);
+    if (!success) {
+      setIsLoading(false);
+      setCode(""); // Clear code on failure
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+      <div className="bg-slate-800 p-8 rounded-lg shadow-2xl border border-white/10 max-w-sm w-full mx-4">
+        <form
+          onSubmit={handleSubmit}
+          className="flex flex-col gap-4 items-center"
+        >
+          <h2 className="text-xl font-bold">Verification Required</h2>
+          <p className="text-slate-400 text-center text-sm">
+            Enter the code from your authenticator app to reveal this password.
+          </p>
+          <input
+            type="text"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            placeholder="6-digit code"
+            maxLength="6"
+            className="bg-slate-900/60 px-3 py-2 rounded-lg border border-white/10 text-center w-40 text-2xl tracking-widest"
+          />
+          <div className="flex gap-2 w-full">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isLoading}
+              className="bg-slate-600/50 hover:bg-slate-600 font-bold py-2 rounded-lg transition-all w-full"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="bg-violet-600 hover:bg-violet-700 font-bold py-2 rounded-lg transition-all w-full"
+            >
+              {isLoading ? "Verifying..." : "Verify"}
+            </button>
           </div>
-        ))}
-      </section>
+        </form>
+      </div>
     </div>
   );
 }
