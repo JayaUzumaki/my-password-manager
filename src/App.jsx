@@ -185,6 +185,7 @@ function Dashboard({ session }) {
   const [website, setWebsite] = React.useState("");
   const [username, setUsername] = React.useState("");
   const [newPassword, setNewPassword] = React.useState("");
+  const [iconFile, setIconFile] = React.useState(null);
   const [searchQuery, setSearchQuery] = React.useState("");
 
   const [revealedPassword, setRevealedPassword] = React.useState({});
@@ -195,7 +196,7 @@ function Dashboard({ session }) {
     setLoadingPasswords(true);
     const { data, error } = await supabase
       .from("passwords")
-      .select("id, website_url, username, encrypted_password");
+      .select("id, website_url, username, encrypted_password, icon_url");
     if (error) {
       setError("Could not fetch passwords.");
     } else {
@@ -270,6 +271,29 @@ function Dashboard({ session }) {
       return;
     }
     setError(null);
+
+    let uploadedIconUrl = null;
+    if (iconFile) {
+      const fileExt = iconFile.name.split(".").pop();
+      const fileName = `${Math.random()}.${fileExt}`;
+      const filePath = `${session.user.id}/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("entry-icons")
+        .upload(filePath, iconFile);
+
+      if (uploadError) {
+        setError("Failed to upload icon.");
+        console.error(uploadError);
+        return;
+      }
+
+      const { data: urlData } = supabase.storage
+        .from("entry-icons")
+        .getPublicUrl(filePath);
+      uploadedIconUrl = urlData.publicUrl;
+    }
+
     const encrypted = await encrypt(newPassword, decryptionKey);
     const { data: newPasswordData, error } = await supabase
       .from("passwords")
@@ -278,6 +302,7 @@ function Dashboard({ session }) {
         username: username,
         encrypted_password: encrypted,
         user_id: session.user.id,
+        icon_url: uploadedIconUrl,
       })
       .select()
       .single();
@@ -288,17 +313,87 @@ function Dashboard({ session }) {
       setWebsite("");
       setUsername("");
       setNewPassword("");
+      setIconFile(null);
+      if (document.getElementById("icon-file-input")) {
+        document.getElementById("icon-file-input").value = "";
+      }
+    }
+  };
+
+  const handleIconChange = async (event, passwordId) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // Step 1: Find the old icon URL before doing anything else
+    const passwordEntry = passwords.find((p) => p.id === passwordId);
+    const oldIconUrl = passwordEntry?.icon_url;
+
+    // Step 2: Upload the new icon
+    const fileExt = file.name.split(".").pop();
+    const fileName = `${Math.random()}.${fileExt}`;
+    const filePath = `${session.user.id}/${fileName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("entry-icons")
+      .upload(filePath, file);
+    if (uploadError) {
+      setError("Failed to upload new icon.");
+      console.error(uploadError);
+      return;
+    }
+
+    const { data: urlData } = supabase.storage
+      .from("entry-icons")
+      .getPublicUrl(filePath);
+    const newIconUrl = urlData.publicUrl;
+
+    // Step 3: Update the database with the new URL
+    const { error: updateError } = await supabase
+      .from("passwords")
+      .update({ icon_url: newIconUrl })
+      .eq("id", passwordId);
+
+    if (updateError) {
+      setError("Failed to update icon URL.");
+      return; // Stop if the database update fails
+    }
+
+    // Step 4: After successful DB update, delete the old icon if it exists
+    if (oldIconUrl) {
+      const oldIconPath = oldIconUrl.split("/entry-icons/")[1];
+      const { error: removeError } = await supabase.storage
+        .from("entry-icons")
+        .remove([oldIconPath]);
+      if (removeError) {
+        // This is not a critical error, so we just log it. The main functionality worked.
+        console.error("Failed to remove old icon:", removeError);
+      }
     }
   };
 
   const handleDeletePassword = async (id) => {
+    const passwordEntry = passwords.find((p) => p.id === id);
+    const iconUrl = passwordEntry?.icon_url;
+
     const { error } = await supabase.from("passwords").delete().match({ id });
     if (error) {
       setError("Failed to delete password.");
-    } else {
-      setPasswords((prev) => prev.filter((p) => p.id !== id));
-      setConfirmingDeleteId(null);
+      return;
     }
+
+    // If DB deletion is successful, delete the associated icon
+    if (iconUrl) {
+      const iconPath = iconUrl.split("/entry-icons/")[1];
+      const { error: removeError } = await supabase.storage
+        .from("entry-icons")
+        .remove([iconPath]);
+      if (removeError) {
+        console.error("Failed to remove icon on delete:", removeError);
+      }
+    }
+
+    setPasswords((prev) => prev.filter((p) => p.id !== id));
+    setConfirmingDeleteId(null);
   };
 
   const revealPassword = async (id, encryptedPass) => {
@@ -447,6 +542,18 @@ function Dashboard({ session }) {
               <i className="fa-solid fa-wand-magic-sparkles w-5 h-5"></i>
             </button>
           </div>
+          <div className="md:col-span-2">
+            <label htmlFor="icon-file-input" className="text-sm text-slate-400">
+              Custom Icon (optional)
+            </label>
+            <input
+              id="icon-file-input"
+              type="file"
+              onChange={(e) => setIconFile(e.target.files[0])}
+              accept="image/png, image/jpeg, image/webp"
+              className="mt-1 block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-violet-500/20 file:text-violet-300 hover:file:bg-violet-500/30"
+            />
+          </div>
           <button
             type="submit"
             className="bg-green-600 hover:bg-green-700 font-bold py-2 px-4 rounded-lg transition-all md:col-span-2 transform hover:scale-[1.02] active:scale-100"
@@ -486,16 +593,33 @@ function Dashboard({ session }) {
             className="bg-black/20 p-4 rounded-lg border border-white/10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
           >
             <div className="flex items-center gap-4 flex-grow">
-              <img
-                src={`https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`}
-                alt="site icon"
-                className="w-8 h-8 rounded-full bg-slate-700 object-contain p-1"
-                onError={(e) => {
-                  // Fallback to a generic icon if the favicon fails to load
-                  e.target.onerror = null;
-                  e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
-                }}
-              />
+              <div className="relative group flex-shrink-0">
+                <img
+                  src={
+                    p.icon_url ||
+                    `https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`
+                  }
+                  alt="site icon"
+                  className="w-10 h-10 rounded-full bg-slate-700 object-contain p-1"
+                  onError={(e) => {
+                    e.target.onerror = null;
+                    e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
+                  }}
+                />
+                <label
+                  htmlFor={`icon-change-${p.id}`}
+                  className="absolute inset-0 bg-black/60 rounded-full flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <i className="fa-solid fa-camera text-white text-lg"></i>
+                  <input
+                    type="file"
+                    id={`icon-change-${p.id}`}
+                    className="hidden"
+                    accept="image/png, image/jpeg, image/webp"
+                    onChange={(e) => handleIconChange(e, p.id)}
+                  />
+                </label>
+              </div>
               <div className="flex-grow">
                 <p className="font-bold text-lg text-violet-300 break-words">
                   {p.website_url}
