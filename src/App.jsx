@@ -185,6 +185,7 @@ function Dashboard({ session }) {
   const [website, setWebsite] = React.useState("");
   const [username, setUsername] = React.useState("");
   const [newPassword, setNewPassword] = React.useState("");
+  const [searchQuery, setSearchQuery] = React.useState("");
 
   const [revealedPassword, setRevealedPassword] = React.useState({});
   const [confirmingDeleteId, setConfirmingDeleteId] = React.useState(null);
@@ -217,6 +218,14 @@ function Dashboard({ session }) {
       supabase.removeChannel(channel);
     };
   }, [getPasswords]);
+
+  const filteredPasswords = React.useMemo(() => {
+    return passwords.filter(
+      (p) =>
+        p.website_url.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        p.username.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  }, [passwords, searchQuery]);
 
   const setKeyAndUnlock = async (keyfileContent) => {
     if (!keyfileContent) {
@@ -448,60 +457,86 @@ function Dashboard({ session }) {
         {error && <p className="text-red-400 mt-4 text-center">{error}</p>}
       </section>
 
-      <section className="flex flex-col gap-3">
+      <section className="flex flex-col gap-4">
+        <div className="relative">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search vault..."
+            className="bg-slate-800/60 w-full pl-10 pr-4 py-2 rounded-lg border border-white/10 focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all"
+          />
+          <i className="fa-solid fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+        </div>
+
         {loadingPasswords && (
           <p className="text-center text-slate-400">Loading credentials...</p>
         )}
-        {!passwords.length && !loadingPasswords && (
+        {!filteredPasswords.length && !loadingPasswords && (
           <p className="text-center text-slate-400 p-4">
-            Your vault is empty. Add a new credential to get started.
+            {passwords.length > 0
+              ? "No results found."
+              : "Your vault is empty."}
           </p>
         )}
-        {passwords.map((p) => (
+
+        {filteredPasswords.map((p) => (
           <div
             key={p.id}
             className="bg-black/20 p-4 rounded-lg border border-white/10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
           >
-            <div className="flex-grow">
-              <p className="font-bold text-lg text-violet-300 break-words">
-                {p.website_url}
-              </p>
-              <div className="flex items-center gap-2">
-                <p className="text-slate-300 break-words">{p.username}</p>
-                <button
-                  onClick={() =>
-                    handleCopyToClipboard(p.username, `${p.id}-user`)
-                  }
-                  title="Copy Username"
-                  className="text-slate-400 hover:text-white transition-colors"
-                >
-                  {copiedInfo.id === `${p.id}-user` ? (
-                    <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
-                  ) : (
-                    <i className="fa-solid fa-copy w-4 h-4"></i>
-                  )}
-                </button>
-              </div>
-              {revealedPassword[p.id] && (
-                <div className="flex items-center gap-2 mt-2">
-                  <span className="font-mono text-sm bg-slate-800 p-1 rounded break-all">
-                    {revealedPassword[p.id]}
-                  </span>
+            <div className="flex items-center gap-4 flex-grow">
+              <img
+                src={`https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`}
+                alt="site icon"
+                className="w-8 h-8 rounded-full bg-slate-700 object-contain p-1"
+                onError={(e) => {
+                  // Fallback to a generic icon if the favicon fails to load
+                  e.target.onerror = null;
+                  e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
+                }}
+              />
+              <div className="flex-grow">
+                <p className="font-bold text-lg text-violet-300 break-words">
+                  {p.website_url}
+                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-slate-300 break-words">{p.username}</p>
                   <button
                     onClick={() =>
-                      handleCopyToClipboard(revealedPassword[p.id], p.id)
+                      handleCopyToClipboard(p.username, `${p.id}-user`)
                     }
-                    title="Copy Password"
+                    title="Copy Username"
                     className="text-slate-400 hover:text-white transition-colors"
                   >
-                    {copiedInfo.id === p.id ? (
+                    {copiedInfo.id === `${p.id}-user` ? (
                       <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
                     ) : (
                       <i className="fa-solid fa-copy w-4 h-4"></i>
                     )}
                   </button>
                 </div>
-              )}
+                {revealedPassword[p.id] && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <span className="font-mono text-sm bg-slate-800 p-1 rounded break-all">
+                      {revealedPassword[p.id]}
+                    </span>
+                    <button
+                      onClick={() =>
+                        handleCopyToClipboard(revealedPassword[p.id], p.id)
+                      }
+                      title="Copy Password"
+                      className="text-slate-400 hover:text-white transition-colors"
+                    >
+                      {copiedInfo.id === p.id ? (
+                        <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
+                      ) : (
+                        <i className="fa-solid fa-copy w-4 h-4"></i>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
               <button
