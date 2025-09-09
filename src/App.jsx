@@ -229,11 +229,13 @@ function Dashboard({ session }) {
     const { data, error } = await supabase
       .from("profiles")
       .select("mfa_enabled")
+      .eq("id", session.user.id)
       .single();
     if (error && error.code !== "PGRST116") {
       // PGRST116 means no row found
       console.error("Error fetching profile:", error);
     } else if (data) {
+      console.log("MFA status:", session.user.id, data.mfa_enabled);
       setIsMfaEnabled(data.mfa_enabled);
     } else {
       setIsMfaEnabled(false);
@@ -461,9 +463,22 @@ function Dashboard({ session }) {
   };
 
   const handleMfaVerification = async (totp) => {
+    const { data: factors, error: listError } =
+      await supabase.auth.mfa.listFactors();
+    console.log("MFA factors:", factors, listError);
+    if (listError) {
+      console.error("Error fetching factors:", listError);
+      return;
+    }
+
+    const totpFactor = factors.totp?.find((f) => f.status === "verified");
+    if (!totpFactor) {
+      console.error("No verified TOTP factor found");
+      return;
+    }
     const { data, error } = await supabase.auth.mfa.challengeAndVerify({
-      factorType: "totp",
-      code: totp,
+      factorId: totpFactor.id, // ✅ use the verified TOTP factor's id
+      code: totp, // the 6-digit code from Authy/Google Authenticator
     });
 
     if (error) {
@@ -817,6 +832,7 @@ function MfaSetup({ isEnabled, onStatusChange }) {
     const { data: factorsData, error: factorsError } =
       await supabase.auth.mfa.listFactors();
     if (factorsError) {
+      console.error("Error listing MFA factors:", factorsError);
       setError(factorsError.message);
       return;
     }
