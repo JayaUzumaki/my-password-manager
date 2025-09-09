@@ -219,6 +219,13 @@ function Dashboard({ session }) {
   const [confirmingDeleteId, setConfirmingDeleteId] = React.useState(null);
   const [copiedInfo, setCopiedInfo] = React.useState({ id: null, timer: null });
 
+  // Edit State
+  const [editingPasswordId, setEditingPasswordId] = React.useState(null);
+  const [editingData, setEditingData] = React.useState({
+    username: "",
+    password: "",
+  });
+
   // MFA State
   const [isMfaEnabled, setIsMfaEnabled] = React.useState(false);
   const [showMfaSetup, setShowMfaSetup] = React.useState(false);
@@ -235,12 +242,11 @@ function Dashboard({ session }) {
       // PGRST116 means no row found
       console.error("Error fetching profile:", error);
     } else if (data) {
-      console.log("MFA status:", session.user.id, data.mfa_enabled);
       setIsMfaEnabled(data.mfa_enabled);
     } else {
       setIsMfaEnabled(false);
     }
-  }, []);
+  }, [session.user.id]);
 
   const getPasswords = React.useCallback(async () => {
     setLoadingPasswords(true);
@@ -440,12 +446,54 @@ function Dashboard({ session }) {
     setConfirmingDeleteId(null);
   };
 
+  const handleEditClick = async (password) => {
+    if (isMfaEnabled) {
+      setPasswordToVerify({ ...password, intent: "edit" });
+      setIsMfaModalOpen(true);
+    } else {
+      const decrypted = await decrypt(
+        password.encrypted_password,
+        decryptionKey
+      );
+      if (decrypted) {
+        setEditingPasswordId(password.id);
+        setEditingData({ username: password.username, password: decrypted });
+      } else {
+        setError("Decryption failed. Cannot edit entry.");
+      }
+    }
+  };
+
+  const handleUpdatePassword = async (e) => {
+    e.preventDefault();
+    const encrypted = await encrypt(editingData.password, decryptionKey);
+
+    const { error } = await supabase
+      .from("passwords")
+      .update({
+        username: editingData.username,
+        encrypted_password: encrypted,
+      })
+      .eq("id", editingPasswordId);
+
+    if (error) {
+      setError("Failed to update password.");
+    } else {
+      setEditingPasswordId(null);
+      getPasswords(); // Refresh passwords from DB
+    }
+  };
+
   const revealPassword = async (id, encryptedPass) => {
     if (isMfaEnabled) {
       if (revealedPassword[id]) {
         setRevealedPassword((prev) => ({ ...prev, [id]: null }));
       } else {
-        setPasswordToVerify({ id, encryptedPass });
+        setPasswordToVerify({
+          id,
+          encrypted_password: encryptedPass,
+          intent: "reveal",
+        });
         setIsMfaModalOpen(true);
       }
     } else {
@@ -465,38 +513,56 @@ function Dashboard({ session }) {
   const handleMfaVerification = async (totp) => {
     const { data: factors, error: listError } =
       await supabase.auth.mfa.listFactors();
-    console.log("MFA factors:", factors, listError);
+
     if (listError) {
       console.error("Error fetching factors:", listError);
-      return;
+      return "Could not fetch MFA factors.";
     }
 
     const totpFactor = factors.totp?.find((f) => f.status === "verified");
     if (!totpFactor) {
       console.error("No verified TOTP factor found");
-      return;
+      return "No verified MFA method found.";
     }
-    const { data, error } = await supabase.auth.mfa.challengeAndVerify({
-      factorId: totpFactor.id, // ✅ use the verified TOTP factor's id
-      code: totp, // the 6-digit code from Authy/Google Authenticator
+
+    const { error } = await supabase.auth.mfa.challengeAndVerify({
+      factorId: totpFactor.id,
+      code: totp,
     });
 
     if (error) {
-      setError(error.message);
-      return false;
+      console.error("MFA Verification Error:", error.message);
+      return "Enter valid code";
     }
 
-    const { id, encryptedPass } = passwordToVerify;
-    const decrypted = await decrypt(encryptedPass, decryptionKey);
+    if (!passwordToVerify) {
+      return "An internal error occurred. Please try again.";
+    }
+
+    const { id, encrypted_password, intent } = passwordToVerify;
+    const decrypted = await decrypt(encrypted_password, decryptionKey);
+
     if (decrypted) {
-      setRevealedPassword((prev) => ({ ...prev, [id]: decrypted }));
+      if (intent === "reveal") {
+        setRevealedPassword((prev) => ({ ...prev, [id]: decrypted }));
+      } else if (intent === "edit") {
+        setEditingPasswordId(id);
+        setEditingData({
+          username: passwordToVerify.username,
+          password: decrypted,
+        });
+      }
       setIsMfaModalOpen(false);
       setPasswordToVerify(null);
       setError(null);
       return true;
     } else {
-      setError("Decryption failed after MFA verification.");
-      return false;
+      const failMsg =
+        intent === "edit"
+          ? "Decryption failed. Cannot edit entry."
+          : "Decryption failed after verification.";
+      console.error(failMsg);
+      return failMsg;
     }
   };
 
@@ -703,111 +769,187 @@ function Dashboard({ session }) {
             {filteredPasswords.map((p) => (
               <div
                 key={p.id}
-                className="bg-black/20 p-4 rounded-lg border border-white/10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+                className="bg-black/20 p-4 rounded-lg border border-white/10 "
               >
-                <div className="flex items-center gap-4 flex-grow">
-                  <div className="relative group flex-shrink-0">
-                    <img
-                      src={
-                        p.icon_url ||
-                        `https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`
-                      }
-                      alt="site icon"
-                      className="w-10 h-10 rounded-full bg-slate-700 object-contain p-1"
-                      onError={(e) => {
-                        e.target.onerror = null;
-                        e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
-                      }}
-                    />
-                    <label
-                      htmlFor={`icon-change-${p.id}`}
-                      className="absolute inset-0 bg-black/60 rounded-full flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      <i className="fa-solid fa-camera text-white text-lg"></i>
-                      <input
-                        type="file"
-                        id={`icon-change-${p.id}`}
-                        className="hidden"
-                        accept="image/png, image/jpeg, image/webp"
-                        onChange={(e) => handleIconChange(e, p.id)}
-                      />
-                    </label>
-                  </div>
-                  <div className="flex-grow">
-                    <p className="font-bold text-lg text-violet-300 break-words">
-                      {p.website_url}
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <p className="text-slate-300 break-words">{p.username}</p>
-                      <button
-                        onClick={() =>
-                          handleCopyToClipboard(p.username, `${p.id}-user`)
+                {editingPasswordId === p.id ? (
+                  <form
+                    onSubmit={handleUpdatePassword}
+                    className="flex flex-col gap-4"
+                  >
+                    <div className="flex items-center gap-4">
+                      <img
+                        src={
+                          p.icon_url ||
+                          `https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`
                         }
-                        title="Copy Username"
-                        className="text-slate-400 hover:text-white transition-colors"
+                        alt="site icon"
+                        className="w-10 h-10 rounded-full bg-slate-700 object-contain p-1 flex-shrink-0"
+                      />
+                      <div className="flex-grow">
+                        <p className="font-bold text-lg text-violet-300 break-words">
+                          {p.website_url}
+                        </p>
+                        <input
+                          type="text"
+                          value={editingData.username}
+                          onChange={(e) =>
+                            setEditingData({
+                              ...editingData,
+                              username: e.target.value,
+                            })
+                          }
+                          className="bg-slate-800/60 w-full px-2 py-1 rounded-md border border-white/10"
+                        />
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      value={editingData.password}
+                      onChange={(e) =>
+                        setEditingData({
+                          ...editingData,
+                          password: e.target.value,
+                        })
+                      }
+                      className="bg-slate-800/60 w-full px-2 py-1 rounded-md border border-white/10 font-mono"
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingPasswordId(null)}
+                        className="bg-slate-600/50 hover:bg-slate-600 text-white font-bold py-1 px-4 rounded-lg transition-all text-sm"
                       >
-                        {copiedInfo.id === `${p.id}-user` ? (
-                          <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
-                        ) : (
-                          <i className="fa-solid fa-copy w-4 h-4"></i>
-                        )}
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="bg-green-600 hover:bg-green-700 text-white font-bold py-1 px-4 rounded-lg transition-all text-sm"
+                      >
+                        Save
                       </button>
                     </div>
-                    {revealedPassword[p.id] && (
-                      <div className="flex items-center gap-2 mt-2">
-                        <span className="font-mono text-sm bg-slate-800 p-1 rounded break-all">
-                          {revealedPassword[p.id]}
-                        </span>
-                        <button
-                          onClick={() =>
-                            handleCopyToClipboard(revealedPassword[p.id], p.id)
+                  </form>
+                ) : (
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-4 flex-grow">
+                      <div className="relative group flex-shrink-0">
+                        <img
+                          src={
+                            p.icon_url ||
+                            `https://www.google.com/s2/favicons?sz=64&domain_url=${p.website_url}`
                           }
-                          title="Copy Password"
-                          className="text-slate-400 hover:text-white transition-colors"
+                          alt="site icon"
+                          className="w-10 h-10 rounded-full bg-slate-700 object-contain p-1"
+                          onError={(e) => {
+                            e.target.onerror = null;
+                            e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 24 24' fill='none' stroke='rgb(148,163,184)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'%3E%3C/circle%3E%3Cpath d='M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20'%3E%3C/path%3E%3Cpath d='M2 12h20'%3E%3C/path%3E%3C/svg%3E`;
+                          }}
+                        />
+                        <label
+                          htmlFor={`icon-change-${p.id}`}
+                          className="absolute inset-0 bg-black/60 rounded-full flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
                         >
-                          {copiedInfo.id === p.id ? (
-                            <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
-                          ) : (
-                            <i className="fa-solid fa-copy w-4 h-4"></i>
-                          )}
-                        </button>
+                          <i className="fa-solid fa-camera text-white text-lg"></i>
+                          <input
+                            type="file"
+                            id={`icon-change-${p.id}`}
+                            className="hidden"
+                            accept="image/png, image/jpeg, image/webp"
+                            onChange={(e) => handleIconChange(e, p.id)}
+                          />
+                        </label>
                       </div>
-                    )}
+                      <div className="flex-grow">
+                        <p className="font-bold text-lg text-violet-300 break-words">
+                          {p.website_url}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-slate-300 break-words">
+                            {p.username}
+                          </p>
+                          <button
+                            onClick={() =>
+                              handleCopyToClipboard(p.username, `${p.id}-user`)
+                            }
+                            title="Copy Username"
+                            className="text-slate-400 hover:text-white transition-colors"
+                          >
+                            {copiedInfo.id === `${p.id}-user` ? (
+                              <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
+                            ) : (
+                              <i className="fa-solid fa-copy w-4 h-4"></i>
+                            )}
+                          </button>
+                        </div>
+                        {revealedPassword[p.id] && (
+                          <div className="flex items-center gap-2 mt-2">
+                            <span className="font-mono text-sm bg-slate-800 p-1 rounded break-all">
+                              {revealedPassword[p.id]}
+                            </span>
+                            <button
+                              onClick={() =>
+                                handleCopyToClipboard(
+                                  revealedPassword[p.id],
+                                  p.id
+                                )
+                              }
+                              title="Copy Password"
+                              className="text-slate-400 hover:text-white transition-colors"
+                            >
+                              {copiedInfo.id === p.id ? (
+                                <i className="fa-solid fa-check w-4 h-4 text-green-400"></i>
+                              ) : (
+                                <i className="fa-solid fa-copy w-4 h-4"></i>
+                              )}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
+                      <button
+                        onClick={() => handleEditClick(p)}
+                        title="Edit Credential"
+                        className="p-2 bg-slate-700/50 hover:bg-slate-700 rounded-md transition-colors"
+                      >
+                        <i className="fa-solid fa-pencil w-5 h-5"></i>
+                      </button>
+                      <button
+                        onClick={() =>
+                          revealPassword(p.id, p.encrypted_password)
+                        }
+                        title={
+                          revealedPassword[p.id]
+                            ? "Hide Password"
+                            : "Reveal Password"
+                        }
+                        className="p-2 bg-slate-700/50 hover:bg-slate-700 rounded-md transition-colors"
+                      >
+                        {revealedPassword[p.id] ? (
+                          <i className="fa-solid fa-eye-slash w-5 h-5"></i>
+                        ) : (
+                          <i className="fa-solid fa-eye w-5 h-5"></i>
+                        )}
+                      </button>
+                      {confirmingDeleteId === p.id ? (
+                        <button
+                          onClick={() => handleDeletePassword(p.id)}
+                          className="p-2 bg-yellow-500/80 hover:bg-yellow-500 rounded-md transition-colors text-white font-bold text-xs"
+                        >
+                          Confirm?
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmingDeleteId(p.id)}
+                          title="Delete Credential"
+                          className="p-2 bg-red-600/80 hover:bg-red-600 rounded-md transition-colors"
+                        >
+                          <i className="fa-solid fa-trash-can w-5 h-5"></i>
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-center">
-                  <button
-                    onClick={() => revealPassword(p.id, p.encrypted_password)}
-                    title={
-                      revealedPassword[p.id]
-                        ? "Hide Password"
-                        : "Reveal Password"
-                    }
-                    className="p-2 bg-slate-700/50 hover:bg-slate-700 rounded-md transition-colors"
-                  >
-                    {revealedPassword[p.id] ? (
-                      <i className="fa-solid fa-eye-slash w-5 h-5"></i>
-                    ) : (
-                      <i className="fa-solid fa-eye w-5 h-5"></i>
-                    )}
-                  </button>
-                  {confirmingDeleteId === p.id ? (
-                    <button
-                      onClick={() => handleDeletePassword(p.id)}
-                      className="p-2 bg-yellow-500/80 hover:bg-yellow-500 rounded-md transition-colors text-white font-bold text-xs"
-                    >
-                      Confirm?
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setConfirmingDeleteId(p.id)}
-                      title="Delete Credential"
-                      className="p-2 bg-red-600/80 hover:bg-red-600 rounded-md transition-colors"
-                    >
-                      <i className="fa-solid fa-trash-can w-5 h-5"></i>
-                    </button>
-                  )}
-                </div>
+                )}
               </div>
             ))}
           </section>
@@ -970,19 +1112,27 @@ function MfaSetup({ isEnabled, onStatusChange }) {
 function MfaVerifyModal({ onVerify, onClose }) {
   const [code, setCode] = React.useState("");
   const [isLoading, setIsLoading] = React.useState(false);
+  // Add a local error state to the modal
+  const [error, setError] = React.useState("");
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError(""); // Clear previous errors on new submission
     setIsLoading(true);
-    const success = await onVerify(code);
-    if (!success) {
+    // The onVerify function will now return `true` on success or an error string on failure
+    const result = await onVerify(code);
+
+    // If the result is not `true`, it's an error message.
+    if (result !== true) {
+      setError(result || "Verification failed. Please try again.");
       setIsLoading(false);
-      setCode(""); // Clear code on failure
+      setCode(""); // Clear input on failure
     }
+    // On success, the parent component handles closing the modal.
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in">
       <div className="bg-slate-800 p-8 rounded-lg shadow-2xl border border-white/10 max-w-sm w-full mx-4">
         <form
           onSubmit={handleSubmit}
@@ -1000,19 +1150,23 @@ function MfaVerifyModal({ onVerify, onClose }) {
             maxLength="6"
             className="bg-slate-900/60 px-3 py-2 rounded-lg border border-white/10 text-center w-40 text-2xl tracking-widest"
           />
+          {/* Display the local error message here */}
+          {error && (
+            <p className="text-red-400 text-center text-sm -mt-2">{error}</p>
+          )}
           <div className="flex gap-2 w-full">
             <button
               type="button"
               onClick={onClose}
               disabled={isLoading}
-              className="bg-slate-600/50 hover:bg-slate-600 font-bold py-2 rounded-lg transition-all w-full"
+              className="bg-slate-600/50 hover:bg-slate-600 font-bold py-2 rounded-lg transition-all w-full disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isLoading}
-              className="bg-violet-600 hover:bg-violet-700 font-bold py-2 rounded-lg transition-all w-full"
+              className="bg-violet-600 hover:bg-violet-700 font-bold py-2 rounded-lg transition-all w-full disabled:opacity-50"
             >
               {isLoading ? "Verifying..." : "Verify"}
             </button>
